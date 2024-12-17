@@ -2,7 +2,10 @@ import tkinter as tk
 from tkinter import font as tkFont, scrolledtext
 import random
 import os
+from collections import defaultdict, Counter
+from itertools import combinations
 
+# Constants for suits and ranks
 SUITS = ["Hearts", "Diamonds", "Clubs", "Spades"]
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 RANK_VALUES = {r: i for i, r in enumerate(RANKS, start=2)}
@@ -34,7 +37,6 @@ class Deck:
         return None
 
 def rank_hand(cards):
-    from collections import Counter
     values = sorted([RANK_VALUES[c.rank] for c in cards], reverse=True)
     suits = [c.suit for c in cards]
     vcount = Counter(values)
@@ -78,7 +80,6 @@ def rank_hand(cards):
     return (1,) + tuple(top_five)
 
 def flush_top_values(cards):
-    from collections import defaultdict
     suit_cards = defaultdict(list)
     for c in cards:
         suit_cards[c.suit].append(RANK_VALUES[c.rank])
@@ -103,7 +104,7 @@ def check_straight(vals):
         if temp[i] - 1 == temp[i+1]:
             current_len += 1
             if current_len >= 5:
-                best_high = temp[i-3]
+                best_high = temp[i]
         elif temp[i] != temp[i+1]:
             current_len = 1
     if best_high is not None:
@@ -111,7 +112,6 @@ def check_straight(vals):
     return False, None
 
 def straight_flush_high(cards):
-    from collections import defaultdict
     suit_cards = defaultdict(list)
     for c in cards:
         suit_cards[c.suit].append(RANK_VALUES[c.rank])
@@ -123,7 +123,6 @@ def straight_flush_high(cards):
     return None
 
 def best_five_from_seven(cards):
-    from itertools import combinations
     best = None
     for combo in combinations(cards, 5):
         val = rank_hand(list(combo))
@@ -223,15 +222,25 @@ class TexasHoldemGame:
         self.betting_completed = False
         self.continue_button = None
 
+        # Track each player's contributions to handle side pots and all-ins
+        self.player_contributions = [0 for _ in self.players]
+        self.side_pots = []
+
+        # Flag to indicate if it's currently the human's turn
+        self.human_turn = False  # <-- Added Flag
+
+        # List of players who need to act in the current betting round
+        self.players_to_act = []
+
         self.card_images = {}
         self.card_back_image = None
         self.load_images("cards_polished")
 
         self.setup_ui()
+        self.bind_keys()  # Bind keystrokes after setting up UI
         self.start_hand()
 
     def load_images(self, folder):
-        # Smaller cards again, say subsample(6,6)
         scale_factor = (3, 3)
         back_path = os.path.join(folder, "card_back.png")
         back_img = tk.PhotoImage(file=back_path).subsample(*scale_factor)
@@ -245,7 +254,7 @@ class TexasHoldemGame:
                 self.card_images[(rank, suit)] = img
 
     def setup_ui(self):
-        self.root.title("Texas Hold'em v1.13")
+        self.root.title("Texas Hold'em v1.14")  # Incremented version for updates
 
         bg_main = "#F0F0F0"
         bg_info = "#F8F8F8"
@@ -269,12 +278,15 @@ class TexasHoldemGame:
         self.action_frame = tk.Frame(self.root, bg=bg_action, bd=2, relief=tk.RAISED)
         self.action_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
-        self.call_button = tk.Button(self.action_frame, text="Call/Check", command=self.human_call, bg="#C0C0C0", fg="black")
+        # Action Buttons with Keystroke Indicators
+        self.call_button = tk.Button(self.action_frame, text="Call/Check (C)", command=self.human_call, bg="#C0C0C0", fg="black", state=tk.DISABLED)
         self.call_button.pack(side=tk.LEFT, padx=5)
-        self.fold_button = tk.Button(self.action_frame, text="Fold", command=self.human_fold, bg="#C0C0C0", fg="black")
+        self.fold_button = tk.Button(self.action_frame, text="Fold (F)", command=self.human_fold, bg="#C0C0C0", fg="black", state=tk.DISABLED)
         self.fold_button.pack(side=tk.LEFT, padx=5)
-        self.bet_button = tk.Button(self.action_frame, text="Bet/Raise 50", command=self.human_bet, bg="#C0C0C0", fg="black")
+        self.bet_button = tk.Button(self.action_frame, text="Bet/Raise 50 (B)", command=self.human_bet, bg="#C0C0C0", fg="black", state=tk.DISABLED)
         self.bet_button.pack(side=tk.LEFT, padx=5)
+        self.all_in_button = tk.Button(self.action_frame, text="All-In (A)", command=self.human_all_in, bg="#C0C0C0", fg="black", state=tk.DISABLED)
+        self.all_in_button.pack(side=tk.LEFT, padx=5)
 
         # Main game area
         self.game_frame = tk.Frame(self.root, bg=bg_game)
@@ -287,7 +299,7 @@ class TexasHoldemGame:
         self.log_text = scrolledtext.ScrolledText(self.log_frame, width=40, height=35, bg="#FFFFFF")
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # Community cards & Pot/Stage at top center of the game frame
+        # Community cards & Pot/Stage at top center
         top_area = tk.Frame(self.game_frame, bg=bg_game)
         top_area.pack(side=tk.TOP, pady=10)
 
@@ -300,7 +312,7 @@ class TexasHoldemGame:
         self.community_frame = tk.Frame(top_area, bd=2, relief=tk.RIDGE, bg=bg_community_frame, padx=5, pady=5)
         self.community_frame.pack(side=tk.TOP, pady=10)
 
-        # Players arranged horizontally at the bottom of the game_frame
+        # Players arranged horizontally at bottom
         self.players_frame = tk.Frame(self.game_frame, bg=bg_game)
         self.players_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
 
@@ -310,20 +322,39 @@ class TexasHoldemGame:
             f.pack(side=tk.LEFT, padx=5)
             self.player_frames.append(f)
 
+    def bind_keys(self):
+        # Bind lowercase and uppercase keys to their respective actions
+        self.root.bind('<c>', lambda event: self.human_call())
+        self.root.bind('<C>', lambda event: self.human_call())
+        self.root.bind('<f>', lambda event: self.human_fold())
+        self.root.bind('<F>', lambda event: self.human_fold())
+        self.root.bind('<b>', lambda event: self.human_bet())
+        self.root.bind('<B>', lambda event: self.human_bet())
+        self.root.bind('<a>', lambda event: self.human_all_in())
+        self.root.bind('<A>', lambda event: self.human_all_in())
+
+        # Ensure the root window has focus to capture keystrokes
+        self.root.focus_set()
+
     def log(self, message):
-        """Append a line to the game log."""
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.yview(tk.END)
+
+    def reset_for_new_hand(self):
+        self.pot = 0
+        self.current_bet = 0
+        self.stage = "preflop"
+        self.betting_completed = False
+        self.player_contributions = [0 for _ in self.players]
+        self.side_pots = []
+        self.players_to_act = []  # Reset players to act
 
     def start_hand(self):
         self.deck = Deck()
         for p in self.players:
             p.reset_hand()
         self.community_cards = []
-        self.pot = 0
-        self.current_bet = 0
-        self.stage = "preflop"
-        self.betting_completed = False
+        self.reset_for_new_hand()
 
         if self.continue_button:
             self.continue_button.destroy()
@@ -337,7 +368,10 @@ class TexasHoldemGame:
         self.log("---- New Hand Started ----")
         self.log(f"Dealer: {self.players[self.dealer_index].name}")
 
+        # Determine first player to act preflop (player left of BB)
         self.current_player_index = (self.dealer_index + 3) % len(self.players)
+        self.players_to_act = [p for p in self.players if not p.folded and p != self.players[(self.dealer_index + 2) % len(self.players)]]
+        self.human_turn = False  # Ensure flag is reset
         self.root.after(1000, self.run_betting_round)
 
     def deal_hole_cards(self):
@@ -347,19 +381,23 @@ class TexasHoldemGame:
 
     def post_blinds(self):
         sb_player = self.players[(self.dealer_index + 1) % len(self.players)]
-        sb_amount = sb_player.bet(self.small_blind)
-        sb_player.last_action = f"Post SB {sb_amount}"
-        self.pot += sb_amount
-
         bb_player = self.players[(self.dealer_index + 2) % len(self.players)]
-        bb_amount = bb_player.bet(self.big_blind)
-        bb_player.last_action = f"Post BB {bb_amount}"
-        self.pot += bb_amount
+
+        sb_amount = self.take_bet_from_player(sb_player, self.small_blind)
+        bb_amount = self.take_bet_from_player(bb_player, self.big_blind)
+
         self.current_bet = self.big_blind
 
         self.status_label.config(text=f"{sb_player.name} posts SB {sb_amount}, {bb_player.name} posts BB {bb_amount}")
         self.log(f"{sb_player.name} posts SB {sb_amount}")
         self.log(f"{bb_player.name} posts BB {bb_amount}")
+
+    def take_bet_from_player(self, player, amount):
+        actual = min(amount, player.chips)
+        player.chips -= actual
+        player.current_bet += actual
+        self.player_contributions[self.players.index(player)] += actual
+        return actual
 
     def run_betting_round(self):
         active_players = [p for p in self.players if not p.folded]
@@ -371,63 +409,144 @@ class TexasHoldemGame:
             self.next_stage()
             return
 
+        if not self.players_to_act:
+            # No players left to act, betting round complete
+            self.betting_completed = True
+            self.root.after(1000, self.run_betting_round)
+            return
+
         current_player = self.players[self.current_player_index]
         if current_player.folded:
             self.next_player()
             return
 
         if current_player.is_human:
+            # Indicate it's the human's turn and wait for action
+            self.status_label.config(text=f"{current_player.name}'s turn. Choose an action.")
+            self.human_turn = True  # <-- Set flag to True
+            self.enable_action_buttons()  # <-- Enable buttons for human
             return
         else:
+            # AI decision and action
             action = ai_decision(current_player, self.community_cards, self.current_bet, self.pot, self.stage)
             required = self.current_bet - current_player.current_bet
             if action == "fold":
                 current_player.fold()
+                current_player.last_action = "Fold"
                 self.status_label.config(text=f"{current_player.name} folds.")
                 self.log(f"{current_player.name} folds.")
             elif action == "call":
                 if required > 0:
-                    added = current_player.bet(required)
-                    self.pot += added
-                    current_player.last_action = "Call"
-                    self.status_label.config(text=f"{current_player.name} calls {required}.")
-                    self.log(f"{current_player.name} calls {required}")
+                    if current_player.chips < required:
+                        # Player all-in
+                        all_in_amount = current_player.chips
+                        self.take_bet_from_player(current_player, all_in_amount)
+                        current_player.last_action = f"All-In {all_in_amount}"
+                        self.status_label.config(text=f"{current_player.name} goes all-in with {all_in_amount}.")
+                        self.log(f"{current_player.name} all-in {all_in_amount}")
+                    else:
+                        added = self.take_bet_from_player(current_player, required)
+                        current_player.last_action = "Call"
+                        self.status_label.config(text=f"{current_player.name} calls {required}.")
+                        self.log(f"{current_player.name} calls {required}")
                 else:
                     current_player.last_action = "Check"
                     self.status_label.config(text=f"{current_player.name} checks.")
                     self.log(f"{current_player.name} checks")
             elif action == "raise":
-                call_amount = current_player.bet(required)
-                raise_amount = 50
-                extra = current_player.bet(raise_amount)
-                self.pot += (call_amount + extra)
-                self.current_bet += extra
-                current_player.last_action = "Raise 50"
-                self.status_label.config(text=f"{current_player.name} raises by 50.")
-                self.log(f"{current_player.name} raises by 50")
+                # AI tries to raise by 50 if possible
+                if current_player.chips > required:
+                    call_amount = min(required, current_player.chips)
+                    added_call = self.take_bet_from_player(current_player, call_amount)
+                    raise_amount = min(50, current_player.chips)  # <-- Corrected 'player' to 'current_player'
+                    if raise_amount > 0:
+                        extra = self.take_bet_from_player(current_player, raise_amount)
+                        self.current_bet += extra
+                        current_player.last_action = "Raise 50"
+                        self.status_label.config(text=f"{current_player.name} raises by 50.")
+                        self.log(f"{current_player.name} raises by 50")
+                        # Reset players_to_act since a raise has occurred
+                        self.players_to_act = [p for p in self.players if not p.folded and p != current_player]
+                    else:
+                        # No extra chips to fully raise, just all-in
+                        current_player.last_action = f"All-In {added_call}"
+                        self.status_label.config(text=f"{current_player.name} all-in {added_call}.")
+                        self.log(f"{current_player.name} all-in {added_call}")
+                else:
+                    # All-in due to lack of chips
+                    all_in_amount = current_player.chips
+                    self.take_bet_from_player(current_player, all_in_amount)
+                    current_player.last_action = f"All-In {all_in_amount}"
+                    self.status_label.config(text=f"{current_player.name} all-in with {all_in_amount}.")
+                    self.log(f"{current_player.name} all-in {all_in_amount}")
 
+            self.update_pot()
             self.update_ui()
+
+            # Remove current player from players_to_act
+            if current_player in self.players_to_act:
+                self.players_to_act.remove(current_player)
+
             self.next_player()
+
+    def update_pot(self):
+        self.pot = sum(self.player_contributions)
 
     def next_player(self):
         if self.check_betting_complete():
+            self.create_side_pots()
             self.betting_completed = True
             self.root.after(1000, self.run_betting_round)
             return
 
+        # Advance to next player
         self.current_player_index = (self.current_player_index + 1) % len(self.players)
+        # Skip folded players
         while self.players[self.current_player_index].folded:
             self.current_player_index = (self.current_player_index + 1) % len(self.players)
+        # Check if the player needs to act
+        if self.players[self.current_player_index] in self.players_to_act:
+            # It's their turn to act
+            pass
+        else:
+            # They have already acted, move to next player
+            self.next_player()
+            return
+
         self.root.after(1000, self.run_betting_round)
 
     def check_betting_complete(self):
         active_players = [p for p in self.players if not p.folded]
         if len(active_players) == 1:
             return True
-        for p in active_players:
-            if p.current_bet < self.current_bet and p.chips > 0:
-                return False
-        return True
+        if not self.players_to_act:
+            return True
+        return False
+
+    def create_side_pots(self):
+        # Reset side_pots
+        self.side_pots = []
+        active_contribs = [(self.player_contributions[i], self.players[i]) 
+                           for i, p in enumerate(self.players) if not p.folded and self.player_contributions[i] > 0]
+
+        if not active_contribs:
+            return
+
+        active_contribs.sort(key=lambda x: x[0])
+        previous_level = 0
+        # Layer pots based on contribution levels
+        for i, (contrib, player) in enumerate(active_contribs):
+            if contrib > previous_level:
+                pot_level = contrib - previous_level
+                # Players who contributed at least this level
+                involved_players = [p for j,p in enumerate(self.players) 
+                                    if not p.folded and self.player_contributions[j] >= contrib]
+                pot_size = pot_level * len(involved_players)
+                self.side_pots.append({
+                    'players': involved_players,
+                    'amount': pot_size
+                })
+                previous_level = contrib
 
     def next_stage(self):
         if self.stage == "preflop":
@@ -454,9 +573,26 @@ class TexasHoldemGame:
         self.log(f"Dealing {self.stage.capitalize()}, Pot: {self.pot}")
         self.update_ui()
 
-        self.current_player_index = (self.dealer_index + 1) % len(self.players)
+        # Determine first player to act in new stage
+        if self.stage in ["flop", "turn", "river"]:
+            # First to act is the player left of dealer
+            first_player_index = (self.dealer_index + 1) % len(self.players)
+        else:
+            # Preflop: first to act is player left of big blind
+            first_player_index = (self.dealer_index + 3) % len(self.players)
+
+        # Set current_player_index to first active player
+        self.current_player_index = first_player_index
         while self.players[self.current_player_index].folded:
             self.current_player_index = (self.current_player_index + 1) % len(self.players)
+
+        # Initialize players_to_act list for the new betting round
+        if self.stage == "preflop":
+            # In preflop, players left of big blind have to act
+            self.players_to_act = [p for p in self.players if not p.folded and p != self.players[(self.dealer_index + 2) % len(self.players)]]
+        else:
+            # Postflop, all active players left of dealer act
+            self.players_to_act = [p for p in self.players if not p.folded]
 
         self.root.after(1000, self.run_betting_round)
 
@@ -468,29 +604,43 @@ class TexasHoldemGame:
             self.single_player_win(active_players[0])
             return
 
-        best_value = None
-        winners = []
+        player_values = {}
         for p in active_players:
             val = best_five_from_seven(p.cards + self.community_cards)
-            if best_value is None or val > best_value:
-                best_value = val
-                winners = [p]
-            elif val == best_value:
-                winners.append(p)
+            player_values[p] = val
 
-        winning_hand_description = hand_description(best_value)
-        if len(winners) == 1:
-            winner = winners[0]
-            winner.chips += self.pot
-            self.status_label.config(text=f"{winner.name} wins {self.pot} chips with a {winning_hand_description}!")
-            self.log(f"{winner.name} wins {self.pot} with {winning_hand_description}")
-        else:
-            share = self.pot // len(winners)
-            for w in winners:
-                w.chips += share
-            winner_names = ", ".join([w.name for w in winners])
-            self.status_label.config(text=f"Split pot! {winner_names} each win {share} chips with a {winning_hand_description}!")
-            self.log(f"Split pot among {winner_names}, each {share} chips with {winning_hand_description}")
+        if not self.side_pots:
+            # If no side pots were created, it's a single pot scenario
+            self.side_pots = [{'players': active_players, 'amount': self.pot}]
+
+        # Award each pot
+        for side_pot in self.side_pots:
+            contenders = [p for p in side_pot['players'] if p in active_players and p in player_values]
+            if not contenders:
+                continue
+            best_value = None
+            winners = []
+            for p in contenders:
+                val = player_values[p]
+                if best_value is None or val > best_value:
+                    best_value = val
+                    winners = [p]
+                elif val == best_value:
+                    winners.append(p)
+
+            winning_hand_description = hand_description(best_value)
+            if len(winners) == 1:
+                winner = winners[0]
+                winner.chips += side_pot['amount']
+                self.status_label.config(text=f"{winner.name} wins {side_pot['amount']} chips with a {winning_hand_description}!")
+                self.log(f"{winner.name} wins {side_pot['amount']} chips with {winning_hand_description}")
+            else:
+                share = side_pot['amount'] // len(winners)
+                for w in winners:
+                    w.chips += share
+                winner_names = ", ".join([w.name for w in winners])
+                self.status_label.config(text=f"Split pot! {winner_names} each win {share} chips with a {winning_hand_description}!")
+                self.log(f"Split pot among {winner_names}, each {share} chips with {winning_hand_description}")
 
         self.update_ui()
         self.show_continue_button()
@@ -529,7 +679,7 @@ class TexasHoldemGame:
                     action_color = "red"
                 elif "Check" in player.last_action or "Call" in player.last_action:
                     action_color = "blue"
-                elif "Raise" in player.last_action:
+                elif "Raise" in player.last_action or "All-In" in player.last_action:
                     action_color = "green"
                 elif "Post" in player.last_action:
                     action_color = "gray"
@@ -542,7 +692,7 @@ class TexasHoldemGame:
             # Show player cards
             for c in player.cards:
                 if player.is_human or self.stage == "showdown":
-                    img = self.card_images[(c.rank, c.suit)]
+                    img = self.card_images.get((c.rank, c.suit), self.card_back_image)
                 else:
                     img = self.card_back_image
                 lbl_card = tk.Label(frame, image=img, bg="#FFFFFF")
@@ -554,32 +704,63 @@ class TexasHoldemGame:
             widget.destroy()
         tk.Label(self.community_frame, text="Community Cards:", bg="#DDDDDD", fg="black", font=self.bold_font).pack(side=tk.LEFT, padx=5)
         for c in self.community_cards:
-            img = self.card_images[(c.rank, c.suit)]
+            img = self.card_images.get((c.rank, c.suit), self.card_back_image)
             lbl = tk.Label(self.community_frame, image=img, bg="#DDDDDD")
             lbl.image = img
             lbl.pack(side=tk.LEFT, padx=2)
 
         self.root.update_idletasks()
 
-    # ------------ Human Actions ------------
+    def enable_action_buttons(self):
+        # Enable action buttons for human
+        self.call_button.config(state=tk.NORMAL)
+        self.fold_button.config(state=tk.NORMAL)
+        self.bet_button.config(state=tk.NORMAL)
+        self.all_in_button.config(state=tk.NORMAL)
+
+    def disable_action_buttons(self):
+        # Disable action buttons when not human's turn
+        self.call_button.config(state=tk.DISABLED)
+        self.fold_button.config(state=tk.DISABLED)
+        self.bet_button.config(state=tk.DISABLED)
+        self.all_in_button.config(state=tk.DISABLED)
+
+    # Human Actions
     def human_call(self):
+        if not self.human_turn:
+            return  # Prevent action if not human's turn
         player = self.players[self.current_player_index]
         if player.is_human and not player.folded:
             required = self.current_bet - player.current_bet
             if required > 0:
-                added = player.bet(required)
-                self.pot += added
-                player.last_action = "Call"
-                self.status_label.config(text="You call.")
-                self.log(f"You call {added}")
+                if player.chips < required:
+                    # Player all-in
+                    all_in_amount = player.chips
+                    self.take_bet_from_player(player, all_in_amount)
+                    player.last_action = f"All-In {all_in_amount}"
+                    self.status_label.config(text="You go all-in!")
+                    self.log(f"You all-in {all_in_amount}")
+                else:
+                    added = self.take_bet_from_player(player, required)
+                    player.last_action = "Call"
+                    self.status_label.config(text="You call.")
+                    self.log(f"You call {added}")
             else:
                 player.last_action = "Check"
                 self.status_label.config(text="You check.")
                 self.log("You check")
+            self.update_pot()
             self.update_ui()
+            self.human_turn = False  # <-- Reset flag
+            self.disable_action_buttons()  # <-- Disable buttons
+            # Remove player from players_to_act
+            if player in self.players_to_act:
+                self.players_to_act.remove(player)
             self.next_player()
 
     def human_fold(self):
+        if not self.human_turn:
+            return  # Prevent action if not human's turn
         player = self.players[self.current_player_index]
         if player.is_human and not player.folded:
             player.fold()
@@ -587,22 +768,75 @@ class TexasHoldemGame:
             self.status_label.config(text="You fold.")
             self.log("You fold")
             self.update_ui()
+            self.human_turn = False  # <-- Reset flag
+            self.disable_action_buttons()  # <-- Disable buttons
+            # Remove player from players_to_act
+            if player in self.players_to_act:
+                self.players_to_act.remove(player)
             self.next_player()
 
     def human_bet(self):
+        if not self.human_turn:
+            return  # Prevent action if not human's turn
         player = self.players[self.current_player_index]
         if player.is_human and not player.folded:
             required = self.current_bet - player.current_bet
-            call_amount = player.bet(required)
-            raise_amount = 50
-            extra = player.bet(raise_amount)
-            self.pot += (call_amount + extra)
-            self.current_bet += extra
-            player.last_action = "Raise 50"
-            self.status_label.config(text="You raise by 50.")
-            self.log(f"You raise by 50")
+            # Attempt a raise by 50
+            if required > 0:
+                call_amount = min(required, player.chips)
+                self.take_bet_from_player(player, call_amount)
+            raise_amount = min(50, player.chips)
+            if raise_amount > 0:
+                self.take_bet_from_player(player, raise_amount)
+                self.current_bet += raise_amount
+                player.last_action = "Raise 50"
+                self.status_label.config(text="You raise by 50.")
+                self.log("You raise by 50")
+                # Reset players_to_act since a raise has occurred
+                self.players_to_act = [p for p in self.players if not p.folded and p != player]
+            else:
+                # Just call if can't raise
+                if player.chips == 0:
+                    player.last_action = "All-In"
+                    self.status_label.config(text="You are all-in!")
+                    self.log("You all-in")
+                else:
+                    player.last_action = "Call"
+                    self.status_label.config(text="You call.")
+                    self.log("You call")
+            self.update_pot()
             self.update_ui()
+            self.human_turn = False  # <-- Reset flag
+            self.disable_action_buttons()  # <-- Disable buttons
+            # Remove player from players_to_act
+            if player in self.players_to_act:
+                self.players_to_act.remove(player)
             self.next_player()
+
+    def human_all_in(self):
+        if not self.human_turn:
+            return  # Prevent action if not human's turn
+        player = self.players[self.current_player_index]
+        if player.is_human and not player.folded:
+            all_in_amount = player.chips
+            if all_in_amount > 0:
+                self.take_bet_from_player(player, all_in_amount)
+                player.last_action = f"All-In {all_in_amount}"
+                self.status_label.config(text=f"You go all-in with {all_in_amount}.")
+                self.log(f"You all-in with {all_in_amount}")
+                self.update_pot()
+                self.update_ui()
+                self.human_turn = False  # <-- Reset flag
+                self.disable_action_buttons()  # <-- Disable buttons
+                # Remove player from players_to_act
+                if player in self.players_to_act:
+                    self.players_to_act.remove(player)
+                # If a raise occurred, reset players_to_act
+                self.players_to_act = [p for p in self.players if not p.folded and p != player]
+                self.next_player()
+            else:
+                self.status_label.config(text="You have no chips to go all-in.")
+                self.log("All-In failed: No chips left.")
 
 if __name__ == "__main__":
     root = tk.Tk()
