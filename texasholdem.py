@@ -1,9 +1,10 @@
 import tkinter as tk
-from tkinter import font as tkFont, scrolledtext, simpledialog
+from tkinter import font as tkFont, simpledialog
 import random
 import os
 from collections import defaultdict, Counter
 from itertools import combinations
+import time
 
 # Constants for suits and ranks
 SUITS = ["Hearts", "Diamonds", "Clubs", "Spades"]
@@ -12,14 +13,14 @@ RANK_VALUES = {r: i for i, r in enumerate(RANKS, start=2)}
 
 # Thresholds for strategic decisions
 STRONG_HAND_THRESHOLD = 6  # Flush or better
-MEDIUM_HAND_THRESHOLD = 4  # Three of a Kind or better
+MEDIUM_HAND_THRESHOLD = 3  # Three of a Kind or better
 RAISE_THRESHOLD = 6        # For strategic player
-CALL_THRESHOLD = 3         # For strategic player
+CALL_THRESHOLD = 2        # For strategic player
 
 # Table and chip constants
 TABLE_COLOR = "#2F5D3D"
 CHIP_COLORS = ["black", "blue", "green", "red", "white"]
-CHIP_VALUES = {"black": 1, "blue": 5, "green": 10, "red": 25, "white": 100}
+CHIP_VALUES = {"black": 5, "blue": 10, "green": 20, "red": 50, "white": 100}
 CHIP_IMAGE_NAMES = {
     "black": "black_chip.png",
     "blue": "blue_chip.png",
@@ -27,9 +28,16 @@ CHIP_IMAGE_NAMES = {
     "red": "red_chip.png",
     "white": "white_chip.png",
 }
+CHIP_STACK_HEIGHT = 100
+CHIP_STACK_WIDTH = 90
+CHIP_STACK_LIMIT = 6  # Maximum chips in a stack
+MAX_STACKS_PER_PLAYER = 3 # Maximum Stacks allowed for each player
 
 # AI constants
 AI_RAISE_AMOUNT = 50
+UPDATE_DELAY = 100
+MIN_AI_DELAY = 500
+MAX_AI_DELAY = 1500
 
 class Card:
     def __init__(self, rank, suit, image_path):
@@ -236,67 +244,111 @@ class Player:
     def __str__(self):
         return f"{self.name}: {self.chips} chips"
 
-def ai_decision_straightforward(player, community_cards, current_bet, pot, stage):
+def ai_decision_straightforward(player, community_cards, current_bet, pot, stage, raise_count):
     hand_strength = evaluate_hand(player.cards, community_cards)
     if hand_strength >= STRONG_HAND_THRESHOLD:
-        if player.chips > current_bet:
-            return "raise"
+        if player.chips > current_bet and raise_count < 2:
+            return "raise", ai_raise_amount(hand_strength, pot, player.chips)
         else:
-            return "call"
-    elif hand_strength >= MEDIUM_HAND_THRESHOLD:
-        return "call"
+            return "call", 0
+    elif hand_strength >= MEDIUM_HAND_THRESHOLD or random.random() > 0.8:
+        return "call", 0
     else:
-        return "fold"
+        return "fold", 0
 
-def ai_decision_risk_taker(player, community_cards, current_bet, pot, stage):
+def ai_decision_risk_taker(player, community_cards, current_bet, pot, stage, raise_count):
     # Fixed this to make it predictable for testing
+    hand_strength = evaluate_hand(player.cards, community_cards)
     if current_bet == 0:
-        return "call" if player.chips > 0 else "fold"
-    if player.chips > current_bet + AI_RAISE_AMOUNT:
-        return "raise"
+        if player.chips > 0:
+            return "call", 0
+        else:
+            return "fold", 0
+    if player.chips > current_bet + AI_RAISE_AMOUNT and raise_count < 2:
+        return "raise", ai_raise_amount(hand_strength, pot, player.chips)
     elif player.chips > current_bet:
-        return "call"
+        return "call", 0
     else:
-        return "all-in"
+        return "all-in", 0
 
-def ai_decision_strategic(player, community_cards, current_bet, pot, stage):
+def ai_decision_strategic(player, community_cards, current_bet, pot, stage, raise_count):
     hand_strength = evaluate_hand(player.cards, community_cards)
     position_factor = evaluate_position(player)
-    pot_odds = calculate_pot_odds(current_bet, pot)
+    pot_odds = calculate_pot_odds(current_bet, pot, player)
     decision_score = (hand_strength * 0.6) + (position_factor * 0.2) + (pot_odds * 0.2)
 
     if decision_score > RAISE_THRESHOLD:
-        if player.chips > current_bet + AI_RAISE_AMOUNT:
-            return "raise"
+        if player.chips > current_bet + AI_RAISE_AMOUNT and raise_count < 2:
+            return "raise", ai_raise_amount(hand_strength, pot, player.chips)
         else:
-            return "all-in"
+            return "all-in", 0
     elif decision_score > CALL_THRESHOLD:
-        return "call"
+        return "call", 0
     else:
-        return "fold"
+        return "fold", 0
 
-def ai_decision_chaos(player, community_cards, current_bet, pot, stage):
+def ai_decision_chaos(player, community_cards, current_bet, pot, stage, raise_count):
     actions = ["fold", "call", "raise", "all-in"]
     probabilities = [0.2, 0.3, 0.3, 0.2]
     action = random.choices(actions, probabilities)[0]
+    
+    hand_strength = evaluate_hand(player.cards, community_cards)
 
     if action == "raise" and player.chips <= current_bet + AI_RAISE_AMOUNT:
-        action = "call" if player.chips > current_bet else "fold"
+        return "call", 0 if player.chips > current_bet else "fold", 0
     elif action == "all-in" and player.chips < current_bet:
-        action = "fold"
-    return action
-
-def ai_decision(player, community_cards, current_bet, pot, stage):
-    if player.play_style == "straightforward":
-        return ai_decision_straightforward(player, community_cards, current_bet, pot, stage)
-    elif player.play_style == "risk_taker":
-        return ai_decision_risk_taker(player, community_cards, current_bet, pot, stage)
-    elif player.play_style == "strategic":
-        return ai_decision_strategic(player, community_cards, current_bet, pot, stage)
-    elif player.play_style == "chaos":
-        return ai_decision_chaos(player, community_cards, current_bet, pot, stage)
+        return "fold", 0
+    if action == "raise" and raise_count < 2:
+        return action, ai_raise_amount(hand_strength, pot, player.chips)
     else:
-        return "call"
+        return "call", 0
+    
+
+def ai_decision(player, community_cards, current_bet, pot, stage, raise_count):
+    if player.play_style == "straightforward":
+        action, raise_amount = ai_decision_straightforward(player, community_cards, current_bet, pot, stage, raise_count)
+    elif player.play_style == "risk_taker":
+        action, raise_amount = ai_decision_risk_taker(player, community_cards, current_bet, pot, stage, raise_count)
+    elif player.play_style == "strategic":
+        action, raise_amount = ai_decision_strategic(player, community_cards, current_bet, pot, stage, raise_count)
+    elif player.play_style == "chaos":
+        action, raise_amount = ai_decision_chaos(player, community_cards, current_bet, pot, stage, raise_count)
+    else:
+        return "call", 0
+    return action, raise_amount
+
+def ai_raise_amount(hand_strength, pot, player_chips):
+    # Define weights for each factor (adjust as needed)
+    hand_weight = 0.4
+    pot_weight = 0.3
+    stack_weight = 0.3
+    
+    # Normalize the hand strength (range is 0-9)
+    normalized_hand = hand_strength / 9.0
+    
+    # Normalize the pot size (adjust divisor as needed)
+    normalized_pot = min(1, pot / 1000.0)
+    
+    # Normalize the player's chip stack (adjust divisor as needed)
+    normalized_stack = min(1, player_chips / 1000.0)
+
+    # Calculate a base raise amount
+    base_raise = 50
+    
+    # Linear combination to determine the raise multiplier
+    raise_multiplier = (
+        (normalized_hand * hand_weight) +
+        (normalized_pot * pot_weight) +
+        (normalized_stack * stack_weight)
+    )
+    
+    # Use raise multiplier to calculate dynamic raise amount
+    dynamic_raise = int(base_raise * (1 + raise_multiplier))
+
+    # Add a bit of randomness
+    dynamic_raise += random.randint(-5, 5)
+    
+    return max(1, dynamic_raise)  # Ensure the raise is always at least 1
 
 def evaluate_hand(cards, community_cards):
     best_hand = best_five_from_seven(cards + community_cards)
@@ -314,10 +366,10 @@ def evaluate_position(player):
     }
     return position_scores.get(player.name, 1)
 
-def calculate_pot_odds(current_bet, pot):
+def calculate_pot_odds(current_bet, pot, player):
     if (pot + current_bet) == 0:
         return 0
-    return current_bet / (pot + current_bet)
+    return (current_bet - player.current_bet) / (pot + current_bet) if (pot+current_bet)> 0 else 0
 
 class TexasHoldemGame:
     def __init__(self, root):
@@ -326,17 +378,17 @@ class TexasHoldemGame:
 
         self.deck = Deck()
         self.players = [
-            Player("You", 1000, is_human=True, play_style="strategic"),
-            Player("Bob", 1000, play_style="risk_taker"),
-            Player("Fernando", 1000, play_style="strategic"),
-            Player("Alice", 1000, play_style="risk_taker"),
-            Player("Lee", 1000, play_style="strategic"),
-            Player("Tara", 1000, play_style="risk_taker")
+            Player("You", 5000, is_human=True, play_style="strategic"),
+            Player("Bob", 5000, play_style="risk_taker"),
+            Player("Fernando", 5000, play_style="strategic"),
+            Player("Alice", 5000, play_style="risk_taker"),
+            Player("Lee", 5000, play_style="strategic"),
+            Player("Tara", 5000, play_style="risk_taker")
         ]
 
         self.dealer_index = 0
-        self.small_blind = 10
-        self.big_blind = 20
+        self.small_blind = 50
+        self.big_blind = 100
 
         self.current_player_index = 0
         self.community_cards = []
@@ -351,6 +403,7 @@ class TexasHoldemGame:
 
         self.human_turn = False
         self.players_to_act = []
+        self.raise_count = 0
 
         self.card_images = {}
         self.card_back_image = None
@@ -358,7 +411,8 @@ class TexasHoldemGame:
         
         self.chip_images = {}
         self.load_chip_images("chips")
-
+        self.chip_cache = {}
+        
         self.setup_ui()
         self.bind_keys()
         self.start_hand()
@@ -377,7 +431,7 @@ class TexasHoldemGame:
                 self.card_images[(rank, suit)] = img
 
     def load_chip_images(self, folder):
-        scale_factor = 5  # adjust if needed
+        scale_factor = 6  # adjust if needed
         for color, filename in CHIP_IMAGE_NAMES.items():
             path = os.path.join(folder, filename)
             if os.path.exists(path):
@@ -385,6 +439,11 @@ class TexasHoldemGame:
                 self.chip_images[color] = img
             else:
                 raise FileNotFoundError(f"Missing chip image: {path}")
+    
+    def get_chip_image(self, color):
+        if color not in self.chip_cache:
+            self.chip_cache[color] = self.chip_images.get(color)
+        return self.chip_cache[color]
 
     def setup_ui(self):
         self.root.title("♣︎ ♦︎ ♠︎ ♥︎ Texas Hold'em ♣︎ ♦︎ ♠︎ ♥︎")
@@ -484,6 +543,7 @@ class TexasHoldemGame:
         self.player_contributions = [0 for _ in self.players]
         self.side_pots = []
         self.players_to_act = []
+        self.raise_count = 0
 
     def start_hand(self):
         self.deck = Deck()
@@ -510,7 +570,7 @@ class TexasHoldemGame:
             if not p.folded and p != self.players[(self.dealer_index + 2) % len(self.players)]
         ]
         self.human_turn = False
-        self.root.after(1000, self.run_betting_round)
+        self.root.after(UPDATE_DELAY, self.run_betting_round)  # Reduced delay to 100ms
 
     def deal_hole_cards(self):
         for _ in range(2):
@@ -546,7 +606,7 @@ class TexasHoldemGame:
 
         if not self.players_to_act:
             self.betting_completed = True
-            self.root.after(1000, self.run_betting_round)
+            self.root.after(UPDATE_DELAY, self.run_betting_round)  # Reduced delay to 100ms
             return
 
         current_player = self.players[self.current_player_index]
@@ -556,19 +616,24 @@ class TexasHoldemGame:
 
         # Human or AI
         if current_player.is_human:
-            self.status_label.config(text=f"Your turn. Choose an action.")
+            self.status_label.config(text=f"Your turn. Choose an action. (Max 2 Raises Per Betting Round)")
             self.human_turn = True
             self.enable_action_buttons()
             self.update_ui()
             return
         else:
-            action = ai_decision(
-                current_player, self.community_cards, 
-                self.current_bet, self.pot, self.stage
+            self.root.after(random.randint(MIN_AI_DELAY, MAX_AI_DELAY),
+                lambda: self.process_ai_turn(current_player)
             )
-            self.process_ai_action(current_player, action)
 
-    def process_ai_action(self, player, action):
+    def process_ai_turn(self, current_player):
+            action, raise_amount = ai_decision(
+                current_player, self.community_cards, 
+                self.current_bet, self.pot, self.stage, self.raise_count
+            )
+            self.process_ai_action(current_player, action, raise_amount)
+
+    def process_ai_action(self, player, action, raise_amount):
         required = self.current_bet - player.current_bet
         if action == "fold":
             player.fold()
@@ -592,18 +657,18 @@ class TexasHoldemGame:
                 self.status_label.config(text=f"{player.name} checks.")
         elif action == "raise":
             # AI is hard-coded to raise AI_RAISE_AMOUNT if possible
-            if player.chips > required + AI_RAISE_AMOUNT:
-                # first call whatever is required
-                call_amount = min(required, player.chips)
-                self.place_bet_with_chips(player, call_amount)
-                raise_amount = min(AI_RAISE_AMOUNT, player.chips)
-                if raise_amount > 0:
+            if player.chips > required + raise_amount:
+                if required > 0:
+                    self.place_bet_with_chips(player, required)
+                
+                if raise_amount > 0 :
                     extra = self.place_bet_with_chips(player, raise_amount)
                     self.current_bet += extra
-                    player.last_action = f"Raise {AI_RAISE_AMOUNT}"
+                    player.last_action = f"Raise {raise_amount}"
                     self.status_label.config(
-                        text=f"{player.name} raises by {AI_RAISE_AMOUNT}."
-                    )
+                        text=f"{player.name} raises by {raise_amount}"   
+                    )                        
+                    self.raise_count += 1
                     # Everyone else must act again
                     self.players_to_act = [
                         p for p in self.players if not p.folded and p != player
@@ -633,7 +698,14 @@ class TexasHoldemGame:
         if len(active_players) == 1:
             self.single_player_win(active_players[0])
             return
-
+        
+        # Added this check so that if all players are all in, then we end the betting round.
+        all_players_all_in = all(p.chips == 0 for p in self.players if not p.folded)
+        if all_players_all_in:
+              self.betting_completed = True
+              self.root.after(UPDATE_DELAY, self.run_betting_round) # Reduced delay to 100ms
+              return
+        
         self.next_player()
 
     def place_bet_with_chips(self, player, amount):
@@ -642,43 +714,50 @@ class TexasHoldemGame:
         player.current_bet += actual
         self.player_contributions[self.players.index(player)] += actual
 
+        # Use integer division to determine how many chips of each value to use
         denominations = sorted(CHIP_VALUES.values(), reverse=True)
         placed_chips = []
         remaining_amount = actual
-        while remaining_amount > 0:
-            for denomination in denominations:
-                if remaining_amount >= denomination:
-                    placed_chips.append(denomination)
-                    remaining_amount -= denomination
-                    break
+        for denomination in denominations:
+            while remaining_amount >= denomination:
+                placed_chips.append(denomination)
+                remaining_amount -= denomination
+        
         player.placed_chips = placed_chips
-        return actual
+        
+        # if player added to the pot, was not already all in, and not human all-in, add player back to `players_to_act`
+        if amount > 0 and amount < player.chips and player in self.players_to_act:
+             self.players_to_act = [
+                 p for p in self.players if not p.folded and p != player
+             ]
 
+        return actual
+    
     def update_pot(self):
         self.pot = sum(self.player_contributions)
 
     def next_player(self):
         # Check if betting is complete before continuing
-        if self.check_betting_complete():
+        if self.check_betting_complete():            
             self.create_side_pots()
             self.betting_completed = True
-            self.root.after(1000, self.run_betting_round)
+            self.root.after(UPDATE_DELAY, self.run_betting_round)  # Reduced delay to 100ms
             return
 
         self.current_player_index = (self.current_player_index + 1) % len(self.players)
 
         # Skip folded players
         while self.players[self.current_player_index].folded:
-            self.current_player_index = (self.current_player_index + 1) % len(self.players)
-        
+             self.current_player_index = (self.current_player_index + 1) % len(self.players)
+
         # If the next player is not in players_to_act, we skip again
         if self.players[self.current_player_index] not in self.players_to_act:
-            if not self.players_to_act:
+           if not self.players_to_act:
                 return # Exit if no players remain to act
-            self.next_player()
-            return
+           self.next_player()
+           return
         
-        self.root.after(1000, self.run_betting_round)
+        self.root.after(UPDATE_DELAY, self.run_betting_round) # Reduced delay to 100ms
 
     def check_betting_complete(self):
         active_players = [p for p in self.players if not p.folded]
@@ -734,6 +813,8 @@ class TexasHoldemGame:
         for p in self.players:
             p.current_bet = 0
             p.last_action = ""
+        
+        self.raise_count = 0
 
         self.betting_completed = False
         self.status_label.config(text=f"Dealing {self.stage.capitalize()}. Pot: {self.pot}")
@@ -748,14 +829,15 @@ class TexasHoldemGame:
         self.current_player_index = first_player_index
         while self.players[self.current_player_index].folded:
             self.current_player_index = (self.current_player_index + 1) % len(self.players)
-
+        
+        # If preflop, players to act is everyone but the big blind. Otherwise, everyone who hasn't folded.
         if self.stage == "preflop":
-            self.players_to_act = [p for p in self.players
+             self.players_to_act = [p for p in self.players
                 if not p.folded and p != self.players[(self.dealer_index + 2) % len(self.players)]]
         else:
-            self.players_to_act = [p for p in self.players if not p.folded]
+             self.players_to_act = [p for p in self.players if not p.folded]
 
-        self.root.after(1000, self.run_betting_round)
+        self.root.after(UPDATE_DELAY, self.run_betting_round) # Reduced delay to 100ms
 
     def do_showdown(self):
         # Force stage to 'showdown' so that UI logic flips all cards face up
@@ -838,53 +920,62 @@ class TexasHoldemGame:
     def update_ui(self):
         self.stage_label.config(text=f"Stage: {self.stage.capitalize()}")
         self.pot_label.config(text=f"Pot: {self.pot}")
-
+        
         for frame, player in zip(self.player_frames, self.players):
-            for widget in frame.winfo_children():
-                widget.destroy()
-
-            # Grey out folded player's frame
-            if player.folded:
-                frame_bg = "#BBBBBB"
-            elif self.players[self.current_player_index] == player:
-                frame_bg = "#FFEB99"
-            else:
-                frame_bg = "#FFFFFF"
-
-            frame.config(bg=frame_bg)
-
-            # Show player's name, chips, any last action
-            action_display = ""
-            action_color = "black"
-            if player.last_action:
-                action_display = f" ({player.last_action})"
-                if "Fold" in player.last_action:
-                    action_color = "red"
-                elif "Check" in player.last_action or "Call" in player.last_action:
-                    action_color = "blue"
-                elif "Raise" in player.last_action or "All-In" in player.last_action:
-                    action_color = "green"
-
-            dealer_button = " (D)" if (self.players.index(player) == self.dealer_index) else ""
-            label_text = f"{player.name}: {player.chips} chips{dealer_button}{action_display}"
-
-            lbl = tk.Label(frame, text=label_text, fg=action_color, bg=frame_bg, font=self.bold_font)
-            lbl.pack()
-
-            self.display_bet_this_round(frame, player, frame_bg)
-            self.display_chips(frame, player, frame_bg)
-
-            # Show hole cards face-up if human or showdown, else facedown
-            for c in player.cards:
-                if player.is_human or self.stage == "showdown":
-                    img = self.card_images.get((c.rank, c.suit), self.card_back_image)
-                else:
-                    img = self.card_back_image
-                lbl_card = tk.Label(frame, image=img, bg=frame_bg)
-                lbl_card.image = img
-                lbl_card.pack(side=tk.LEFT, padx=2, pady=2)
+            self.update_player_frame(frame, player)
 
         # Community cards
+        self.update_community_cards()
+        self.root.update_idletasks()
+
+
+    def update_player_frame(self, frame, player):
+        # Destroy previous widgets
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        # Grey out folded player's frame
+        if player.folded:
+            frame_bg = "#BBBBBB"
+        elif self.players[self.current_player_index] == player:
+            frame_bg = "#FFEB99"
+        else:
+            frame_bg = "#FFFFFF"
+
+        frame.config(bg=frame_bg)
+
+        # Show player's name, chips, any last action
+        action_display = ""
+        action_color = "black"
+        if player.last_action:
+            action_display = f" ({player.last_action})"
+            if "Fold" in player.last_action:
+                action_color = "red"
+            elif "Check" in player.last_action or "Call" in player.last_action:
+                action_color = "blue"
+            elif "Raise" in player.last_action or "All-In" in player.last_action:
+                action_color = "green"
+
+        dealer_button = " (D)" if (self.players.index(player) == self.dealer_index) else ""
+        label_text = f"{player.name}: {player.chips} chips{dealer_button}{action_display}"
+
+        lbl = tk.Label(frame, text=label_text, fg=action_color, bg=frame_bg, font=self.bold_font)
+        lbl.pack()
+
+        self.display_bet_this_round(frame, player, frame_bg)
+        self.display_chips(frame, player, frame_bg)
+
+        # Show hole cards face-up if human or showdown, else facedown
+        for c in player.cards:
+            if player.is_human or self.stage == "showdown":
+                img = self.card_images.get((c.rank, c.suit), self.card_back_image)
+            else:
+                img = self.card_back_image
+            lbl_card = tk.Label(frame, image=img, bg=frame_bg)
+            lbl_card.image = img
+            lbl_card.pack(side=tk.LEFT, padx=2, pady=2)
+
+    def update_community_cards(self):
         for widget in self.community_frame.winfo_children():
             widget.destroy()
         tk.Label(
@@ -898,8 +989,6 @@ class TexasHoldemGame:
             lbl.image = img
             lbl.pack(side=tk.LEFT, padx=2)
 
-        self.root.update_idletasks()
-
     def display_bet_this_round(self, frame, player, bg_color="#000000"):
         bet_this_round = player.current_bet
         bet_label = tk.Label(
@@ -912,31 +1001,61 @@ class TexasHoldemGame:
         chips_frame = tk.Frame(frame, bg=bg_color)
         chips_frame.pack(side=tk.TOP, pady=5)
 
-        chips_canvas = tk.Canvas(chips_frame, width=100, height=120, bg=bg_color, highlightthickness=0)
-        chips_canvas.pack()
-
+        
         placed_chips = player.placed_chips
-        max_display = 40
-        visible_chips = placed_chips[:max_display]
-        extra_count = len(placed_chips) - max_display if len(placed_chips) > max_display else 0
+        sorted_chips = sorted(placed_chips, key=lambda x: CHIP_VALUES[next(k for k, v in CHIP_VALUES.items() if v == x)], reverse=True)
 
-        x_start, y_start = 50, 85
-        x_offset = 0
-        y_offset = 5
+        num_stacks = 0
+        chips_in_stack = 0
+        x_offset_per_stack = 0
+        stacks = []
+        current_stack = []
 
-        # Stack them vertically
-        for i, chip_value in enumerate(visible_chips):
-            chip_color = [k for k, v in CHIP_VALUES.items() if v == chip_value][0]
-            img = self.chip_images.get(chip_color)
-            x = x_start - i * x_offset
-            y = y_start - i * y_offset
-            chips_canvas.create_image(x, y, image=img, anchor=tk.CENTER)
+        for chip_value in sorted_chips:
+            current_stack.append(chip_value)
+            chips_in_stack += 1
+            if chips_in_stack >= CHIP_STACK_LIMIT:
+                 stacks.append(current_stack)
+                 current_stack = []
+                 chips_in_stack = 0
+                 num_stacks+=1
 
-        if extra_count > 0:
-            chips_canvas.create_text(
-                x_start, 20, text=f"+{extra_count} more",
-                fill="black", font=("Helvetica", 8)
-            )
+        if current_stack:
+            stacks.append(current_stack)
+
+        num_stacks = len(stacks)
+        
+        # If we have more stacks than allowed per player, we just truncate to the limit
+        if num_stacks > MAX_STACKS_PER_PLAYER:
+              num_stacks = MAX_STACKS_PER_PLAYER
+              stacks = stacks[:MAX_STACKS_PER_PLAYER]
+
+
+        for stack_index, stack in enumerate(stacks):
+             chips_canvas = tk.Canvas(chips_frame, width=CHIP_STACK_WIDTH, height=CHIP_STACK_HEIGHT, bg=bg_color, highlightthickness=0)
+             chips_canvas.pack(side=tk.LEFT, padx=5)
+
+             max_display = 35
+             visible_chips = stack[:max_display]
+             extra_count = len(stack) - max_display if len(stack) > max_display else 0
+
+             x_start, y_start = CHIP_STACK_WIDTH / 2, CHIP_STACK_HEIGHT - 30
+             x_offset = 0
+             y_offset = 9 # Chip vertical spacing
+
+             # Stack them vertically
+             for i, chip_value in enumerate(visible_chips):
+                  chip_color = [k for k, v in CHIP_VALUES.items() if v == chip_value][0]
+                  img = self.get_chip_image(chip_color)
+                  x = x_start - i * x_offset
+                  y = y_start - i * y_offset
+                  chips_canvas.create_image(x, y, image=img, anchor=tk.CENTER)
+
+             if extra_count > 0:
+                 chips_canvas.create_text(
+                     x_start, 20, text=f"+{extra_count} more",
+                     fill="black", font=("Helvetica", 8)
+                 )
 
     def enable_action_buttons(self):
         self.call_button.config(state=tk.NORMAL)
@@ -1012,6 +1131,9 @@ class TexasHoldemGame:
             return
         player = self.players[self.current_player_index]
         if player.is_human and not player.folded:
+            if self.raise_count >= 2:
+                 self.status_label.config(text="Maximum raises reached, choose call or fold.")
+                 return
             bet_amount = simpledialog.askinteger(
                 "Bet Amount", "Enter bet amount:",
                 minvalue=1, maxvalue=player.chips
@@ -1028,6 +1150,7 @@ class TexasHoldemGame:
                     self.current_bet += extra
                     player.last_action = f"Raise {bet_amount}"
                     self.status_label.config(text=f"You raise by {bet_amount}.")
+                    self.raise_count += 1
                     # Everyone else must act again, unless they're folded
                     self.players_to_act = [
                         p for p in self.players if not p.folded and p != player
