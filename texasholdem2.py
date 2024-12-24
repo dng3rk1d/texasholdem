@@ -435,7 +435,7 @@ class TexasHoldemGame:
                 self.card_images[(rank, suit)] = img
 
     def load_chip_images(self, folder):
-        scale_factor = 6  # adjust if needed
+        scale_factor = 7  # adjust if needed
         for color, filename in CHIP_IMAGE_NAMES.items():
             path = os.path.join(folder, filename)
             if os.path.exists(path):
