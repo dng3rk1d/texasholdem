@@ -49,7 +49,7 @@ class Card:
         return f"{self.rank} of {self.suit}"
 
 class Deck:
-    def __init__(self, card_folder="cards_polished"):
+    def __init__(self, card_folder="cards"):
         self.cards = []
         for suit in SUITS:
             for rank in RANKS:
@@ -116,19 +116,22 @@ def rank_hand(cards):
         kicker = max(v for v in values if v != quad_val)
         return (8, quad_val, kicker)
 
-    # Full House
-    if 3 in freqs and 2 in freqs:
-        three_vals = [k for k, cnt in vcount.items() if cnt == 3]
-        best_three = max(three_vals)
+    # Full House (fixed):
+    # Look for any card that appears at least 3 times, and then check if there is any other card
+    # (which might itself be a triple) that appears at least twice.
+    triple_candidates = [k for k, cnt in vcount.items() if cnt >= 3]
+    if triple_candidates:
+        best_three = max(triple_candidates)
         pair_candidates = [k for k, cnt in vcount.items() if cnt >= 2 and k != best_three]
-        best_pair = max(pair_candidates) if pair_candidates else 0
-        return (7, best_three, best_pair)
+        if pair_candidates:
+            best_pair = max(pair_candidates)
+            return (7, best_three, best_pair)
 
     # Check for Flush or Straight Flush
     if is_flush:
         sf_high = straight_flush_high(cards)
         if sf_high:
-            return (9, sf_high)  # Straight Flush (or Royal if sf_high==14)
+            return (9, sf_high)  # Straight Flush (or Royal if sf_high == 14)
         flush_cards = flush_top_values(cards)
         return (6,) + tuple(flush_cards)
 
@@ -295,7 +298,7 @@ def ai_decision_chaos(player, community_cards, current_bet, pot, stage, raise_co
     hand_strength = evaluate_hand(player.cards, community_cards)
 
     if action == "raise" and player.chips <= current_bet + AI_RAISE_AMOUNT:
-        return "call", 0 if player.chips > current_bet else "fold", 0
+        return ("call", 0) if player.chips > current_bet else ("fold", 0)
     elif action == "all-in" and player.chips < current_bet:
         return "fold", 0
     if action == "raise" and raise_count < 2:
@@ -382,7 +385,7 @@ class TexasHoldemGame:
             Player("Bob", 5000, play_style="risk_taker"),
             Player("Fernando", 5000, play_style="strategic"),
             Player("Alice", 5000, play_style="risk_taker"),
-            Player("Lee", 5000, play_style="strategic"),
+            Player("Lee", 5000, play_style="risk_taker"),
             Player("Tara", 5000, play_style="risk_taker")
         ]
 
@@ -407,7 +410,7 @@ class TexasHoldemGame:
 
         self.card_images = {}
         self.card_back_image = None
-        self.load_images("cards_polished")
+        self.load_images("cards")
         
         self.chip_images = {}
         self.load_chip_images("chips")
@@ -431,7 +434,7 @@ class TexasHoldemGame:
                 self.card_images[(rank, suit)] = img
 
     def load_chip_images(self, folder):
-        scale_factor = 6  # adjust if needed
+        scale_factor = 5  # adjust if needed
         for color, filename in CHIP_IMAGE_NAMES.items():
             path = os.path.join(folder, filename)
             if os.path.exists(path):
@@ -725,12 +728,6 @@ class TexasHoldemGame:
         
         player.placed_chips = placed_chips
         
-        # if player added to the pot, was not already all in, and not human all-in, add player back to `players_to_act`
-        if amount > 0 and amount < player.chips and player in self.players_to_act:
-             self.players_to_act = [
-                 p for p in self.players if not p.folded and p != player
-             ]
-
         return actual
     
     def update_pot(self):
@@ -738,26 +735,20 @@ class TexasHoldemGame:
 
     def next_player(self):
         # Check if betting is complete before continuing
-        if self.check_betting_complete():            
+        if self.check_betting_complete():
             self.create_side_pots()
             self.betting_completed = True
-            self.root.after(UPDATE_DELAY, self.run_betting_round)  # Reduced delay to 100ms
+            self.root.after(UPDATE_DELAY, self.run_betting_round)
             return
 
-        self.current_player_index = (self.current_player_index + 1) % len(self.players)
+        # Iterate through players until finding one who hasn't folded and is in players_to_act
+        for _ in range(len(self.players)):  # safeguard against infinite loop
+            self.current_player_index = (self.current_player_index + 1) % len(self.players)
+            current = self.players[self.current_player_index]
+            if not current.folded and current in self.players_to_act:
+                break
 
-        # Skip folded players
-        while self.players[self.current_player_index].folded:
-             self.current_player_index = (self.current_player_index + 1) % len(self.players)
-
-        # If the next player is not in players_to_act, we skip again
-        if self.players[self.current_player_index] not in self.players_to_act:
-           if not self.players_to_act:
-                return # Exit if no players remain to act
-           self.next_player()
-           return
-        
-        self.root.after(UPDATE_DELAY, self.run_betting_round) # Reduced delay to 100ms
+        self.root.after(UPDATE_DELAY, self.run_betting_round)
 
     def check_betting_complete(self):
         active_players = [p for p in self.players if not p.folded]
@@ -1132,18 +1123,24 @@ class TexasHoldemGame:
         player = self.players[self.current_player_index]
         if player.is_human and not player.folded:
             if self.raise_count >= 2:
-                 self.status_label.config(text="Maximum raises reached, choose call or fold.")
-                 return
+                self.status_label.config(text="Maximum raises reached, choose call or fold.")
+                return
             bet_amount = simpledialog.askinteger(
                 "Bet Amount", "Enter bet amount:",
                 minvalue=1, maxvalue=player.chips
             )
             if bet_amount is not None:
                 required = self.current_bet - player.current_bet
+                # Define a minimum raise (using big blind as a baseline)
+                min_raise = self.big_blind  
+                if required > 0 and bet_amount < required + min_raise:
+                    self.status_label.config(
+                        text=f"Bet must be at least {required + min_raise} (call of {required} plus minimum raise of {min_raise})."
+                    )
+                    return
+                # Cover the call if needed
                 if required > 0:
-                    call_amount = min(required, player.chips)
-                    self.place_bet_with_chips(player, call_amount)
-                
+                    self.place_bet_with_chips(player, required)
                 raise_amount = min(bet_amount, player.chips)
                 if raise_amount > 0:
                     extra = self.place_bet_with_chips(player, raise_amount)
@@ -1151,27 +1148,20 @@ class TexasHoldemGame:
                     player.last_action = f"Raise {bet_amount}"
                     self.status_label.config(text=f"You raise by {bet_amount}.")
                     self.raise_count += 1
-                    # Everyone else must act again, unless they're folded
-                    self.players_to_act = [
-                        p for p in self.players if not p.folded and p != player
-                    ]
+                    self.players_to_act = [p for p in self.players if not p.folded and p != player]
                 else:
-                    # If raise_amount == 0 but player has 0 chips, that's effectively All-In
                     if player.chips == 0:
-                         player.last_action = "All-In"
-                         self.status_label.config(text="You are all-in!")
+                        player.last_action = "All-In"
+                        self.status_label.config(text="You are all-in!")
                     else:
                         player.last_action = "Call"
                         self.status_label.config(text="You call.")
-
                 self.update_pot()
                 self.update_ui()
                 self.human_turn = False
                 self.disable_action_buttons()
-
                 if player in self.players_to_act:
                     self.players_to_act.remove(player)
-
                 active_players = [p for p in self.players if not p.folded]
                 if len(active_players) == 1:
                     self.single_player_win(active_players[0])
